@@ -1,0 +1,23 @@
+# SAM 3 Shark Pipeline Requirements
+
+# Core dependencies (will be installed via conda/pip in setup)
+# torch==2.7.0+cu126  # Installed separately with CUDA
+# torchvision
+# torchaudio
+
+# SAM 3 (installed via git clone + pip install -e)
+# sam3  # from facebookresearch/sam3
+
+# Image processing
+opencv-python>=4.8.0
+pillow>=10.0.0
+numpy>=1.24.0
+
+# Data handling
+tqdm>=4.65.0
+
+# HuggingFace for checkpoint download
+huggingface-hub>=0.19.0
+
+# Optional: If you want to upload directly to Roboflow from Unity
+# roboflow>=1.1.0
