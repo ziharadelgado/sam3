@@ -64,7 +64,7 @@ pip install einops psutil
 echo ""
 echo "Step 4: Installing pipeline dependencies..."
 
-PIPELINE_DIR="/home/zihara_delgado_uri_edu/sam3-shark-pipeline"
+PIPELINE_DIR="/home/zihara_delgado_uri_edu/sam3-pipeline"
 cd "$PIPELINE_DIR"
 
 # Install from requirements.txt
