@@ -34,8 +34,8 @@ WORK_DIR="/home/zihara_delgado_uri_edu"
 QUEUE_DIR="$WORK_DIR/queue"
 OUTPUT_DIR="$WORK_DIR/processed"
 CHECKPOINT="$WORK_DIR/checkpoints/sam3.pt"
-GDRIVE_QUEUE="gdrive:DeepSeaObjectDetection/rclone/queue/"
-GDRIVE_OUTPUT="gdrive:DeepSeaObjectDetection/rclone/processed/"
+GDRIVE_QUEUE="gdrive:DeepSea_ObjectDetection/rclone/queue/"
+GDRIVE_OUTPUT="gdrive:DeepSea_ObjectDetection/rclone/processed/"
 
 # 3. Download queue from Google Drive
 echo ""
