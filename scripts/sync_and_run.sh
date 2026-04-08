@@ -39,6 +39,14 @@ if ls "$QUEUE_DIR"/*.zip 1> /dev/null 2>&1; then
     cd -
     echo "✓ Extraction complete"
 fi
+# Move files from subdirectories to queue root
+for subdir in "$QUEUE_DIR"/*/ ; do
+    if [ -d "$subdir" ]; then
+        echo "Moving files from subdirectory..."
+        mv "$subdir"/* "$QUEUE_DIR/" 2>/dev/null || true
+        rmdir "$subdir" 2>/dev/null || true
+    fi
+done
 # Verify we have data
 if [ ! -f "$QUEUE_DIR/annotations.json" ]; then
     echo "❌ ERROR: annotations.json not found in queue"
