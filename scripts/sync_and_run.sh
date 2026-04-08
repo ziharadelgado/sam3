@@ -31,7 +31,14 @@ if [ $? -ne 0 ]; then
     echo "Check rclone configuration: rclone config"
     exit 1
 fi
-
+# Unzip if there's a zip file in queue
+if ls "$QUEUE_DIR"/*.zip 1> /dev/null 2>&1; then
+    echo "Found zip file, extracting..."
+    cd "$QUEUE_DIR"
+    unzip -o *.zip
+    cd -
+    echo "✓ Extraction complete"
+fi
 # Verify we have data
 if [ ! -f "$QUEUE_DIR/annotations.json" ]; then
     echo "❌ ERROR: annotations.json not found in queue"
