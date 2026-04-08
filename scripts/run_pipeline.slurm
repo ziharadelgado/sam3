@@ -49,6 +49,24 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+# Unzip if there's a zip file in queue
+if ls "$QUEUE_DIR"/*.zip 1> /dev/null 2>&1; then
+    echo "Found zip file, extracting..."
+    cd "$QUEUE_DIR"
+    unzip -o *.zip
+    cd -
+    echo "✓ Extraction complete"
+fi
+
+# Move files from subdirectories to queue root
+for subdir in "$QUEUE_DIR"/*/ ; do
+    if [ -d "$subdir" ]; then
+        echo "Moving files from subdirectory..."
+        mv "$subdir"/* "$QUEUE_DIR/" 2>/dev/null || true
+        rmdir "$subdir" 2>/dev/null || true
+    fi
+done
+
 # Check that we have data
 if [ ! -f "$QUEUE_DIR/annotations.json" ]; then
     echo "❌ ERROR: annotations.json not found in queue"
@@ -77,7 +95,7 @@ echo ""
 echo "Step 2: Running SAM 3 segmentation..."
 mkdir -p "$OUTPUT_DIR"
 
-cd /home/zihara_delgado_uri_edu/sam3-shark-pipeline
+cd /home/zihara_delgado_uri_edu/sam3-pipeline
 
 python3 -u src/annotate_with_sam3.py \
     --queue-dir "$QUEUE_DIR" \
