@@ -6,7 +6,7 @@ set -e
 
 PROJECT_DIR="/home/zihara_delgado_uri_edu/sam3-pipeline"
 QUEUE_DIR="/home/zihara_delgado_uri_edu/queue"
-GDRIVE_QUEUE="gdrive:DeepSeaObjectDetection/rclone/queue/"
+GDRIVE_QUEUE="gdrive:DeepSea_ObjectDetection/rclone/queue/"
 
 echo "========================================"
 echo "SAM 3 Shark Pipeline - Sync & Submit"
