@@ -1,9 +1,3 @@
-#!/usr/bin/env python3
-"""
-SAM 3 Shark Annotation Pipeline
-Reads bounding boxes from COCO JSON, converts to segmentation masks using SAM 3
-"""
-
 import os
 import json
 import argparse
@@ -15,70 +9,103 @@ import torch
 import cv2
 from tqdm import tqdm
 
-# SAM 3 imports
+# SAM 3 imports (based on official example)
 from sam3 import build_sam3_image_model
+from sam3.model.box_ops import box_xywh_to_cxcywh
 from sam3.model.sam3_image_processor import Sam3Processor
-from sam3.visualize.utils import draw_box_and_masks
+from sam3.visualization_utils import normalize_bbox
 
 
 class SAM3SharkAnnotator:
     def __init__(self, checkpoint_path, device='cuda'):
         """Initialize SAM 3 model for shark segmentation."""
         print(f"Loading SAM 3 from {checkpoint_path}...")
+        
         self.device = device if torch.cuda.is_available() else 'cpu'
+        
+        # Enable optimizations for Ampere GPUs
+        if torch.cuda.is_available():
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            # Use bfloat16 for efficiency
+            torch.autocast("cuda", dtype=torch.bfloat16).__enter__()
         
         # Build SAM 3 model
         sam3_model = build_sam3_image_model(checkpoint_path=checkpoint_path)
         self.processor = Sam3Processor(sam3_model)
         
         print(f"✓ SAM 3 loaded on {self.device}")
-        
-    def bbox_to_sam3_format(self, bbox):
-        """Convert COCO bbox [x, y, w, h] to SAM 3 format [x1, y1, x2, y2]."""
-        x, y, w, h = bbox
-        return [x, y, x + w, y + h]
     
-    def process_image_with_boxes(self, image_path, bboxes, text_prompt="shark"):
+    def process_image_with_boxes(self, image_path, bboxes):
         """
         Process single image with bounding boxes using SAM 3.
         
         Args:
             image_path: Path to image
             bboxes: List of COCO format bboxes [x, y, w, h]
-            text_prompt: Text prompt for SAM 3 (default: "shark")
             
         Returns:
             List of segmentation masks (one per bbox)
         """
+        # Load image
         image = Image.open(image_path).convert('RGB')
+        width, height = image.size
         
         # Set image in processor
-        state = self.processor.set_image(image)
+        inference_state = self.processor.set_image(image)
         
         masks = []
+        
         for bbox in bboxes:
-            # Convert bbox to SAM 3 format
-            sam3_bbox = self.bbox_to_sam3_format(bbox)
-            
-            # Run SAM 3 with text prompt
-            # SAM 3 uses text prompts to understand what to segment
-            results = self.processor.set_text_prompt(
-                state=state,
-                prompt=text_prompt
-            )
-            
-            # Extract mask from results
-            if results and len(results) > 0:
-                # Get the best mask
-                mask = results[0]['segmentation']
-                masks.append(mask)
-            else:
-                # Fallback: create mask from bbox if SAM 3 fails
-                h, w = np.array(image).shape[:2]
-                mask = np.zeros((h, w), dtype=np.uint8)
-                x, y, bw, bh = bbox
-                mask[int(y):int(y+bh), int(x):int(x+bw)] = 1
-                masks.append(mask)
+            try:
+                # Convert COCO bbox [x,y,w,h] to tensor
+                box_xywh = torch.tensor([bbox], dtype=torch.float32)
+                
+                # Convert to CXCYWH format (center_x, center_y, width, height)
+                box_cxcywh = box_xywh_to_cxcywh(box_xywh)
+                
+                # Normalize bbox to [0,1]
+                norm_box = normalize_bbox(box_cxcywh, width, height).flatten().tolist()
+                
+                # Reset prompts for new prediction
+                self.processor.reset_all_prompts(inference_state)
+                
+                # Add bounding box prompt
+                inference_state = self.processor.add_geometric_prompt(
+                    state=inference_state,
+                    box=norm_box,
+                    label=True  # Positive prompt
+                )
+                
+                # Get prediction
+                results = self.processor.predict(inference_state)
+                
+                # Extract mask from results
+                if results and 'masks' in results and len(results['masks']) > 0:
+                    # Get the first (best) mask
+                    mask = results['masks'][0].cpu().numpy()
+                    
+                    # Convert to binary mask
+                    if mask.ndim == 3:
+                        mask = mask[0]  # Take first channel if needed
+                    
+                    binary_mask = (mask > 0).astype(np.uint8)
+                    masks.append(binary_mask)
+                else:
+                    # Fallback: create mask from bbox
+                    print(f"  ⚠️  SAM 3 returned no mask for bbox, using bbox as fallback")
+                    fallback_mask = np.zeros((height, width), dtype=np.uint8)
+                    x, y, w, h = [int(v) for v in bbox]
+                    fallback_mask[y:y+h, x:x+w] = 1
+                    masks.append(fallback_mask)
+                    
+            except Exception as e:
+                print(f"  ❌ Error processing bbox {bbox}: {e}")
+                # Fallback mask from bbox
+                fallback_mask = np.zeros((height, width), dtype=np.uint8)
+                x, y, w, h = [int(v) for v in bbox]
+                fallback_mask[y:y+h, x:x+w] = 1
+                masks.append(fallback_mask)
         
         return masks
     
@@ -127,8 +154,7 @@ class SAM3SharkAnnotator:
 def process_queue_folder(
     queue_dir,
     output_dir,
-    checkpoint_path,
-    text_prompt="shark"
+    checkpoint_path
 ):
     """
     Process entire queue folder: read COCO annotations, run SAM 3, export YOLO format.
@@ -137,7 +163,6 @@ def process_queue_folder(
         queue_dir: Input folder with images/ and annotations.json
         output_dir: Output folder for processed data
         checkpoint_path: Path to SAM 3 checkpoint
-        text_prompt: Text prompt for SAM 3
     """
     queue_path = Path(queue_dir)
     output_path = Path(output_dir)
@@ -204,11 +229,7 @@ def process_queue_folder(
         
         # Run SAM 3 on this image
         try:
-            masks = annotator.process_image_with_boxes(
-                img_path,
-                bboxes,
-                text_prompt=text_prompt
-            )
+            masks = annotator.process_image_with_boxes(img_path, bboxes)
             
             # Copy image
             shutil.copy(img_path, output_images / filename)
@@ -278,12 +299,6 @@ def main():
         default='/home/zihara_delgado_uri_edu/checkpoints/sam3.pt',
         help='Path to SAM 3 checkpoint'
     )
-    parser.add_argument(
-        '--text-prompt',
-        type=str,
-        default='shark',
-        help='Text prompt for SAM 3 (default: shark)'
-    )
     
     args = parser.parse_args()
     
@@ -291,8 +306,7 @@ def main():
     process_queue_folder(
         queue_dir=args.queue_dir,
         output_dir=args.output_dir,
-        checkpoint_path=args.checkpoint,
-        text_prompt=args.text_prompt
+        checkpoint_path=args.checkpoint
     )
 
 
