@@ -58,12 +58,15 @@ if ls "$QUEUE_DIR"/*.zip 1> /dev/null 2>&1; then
     echo "✓ Extraction complete"
 fi
 
-# Move files from subdirectories to queue root
+# Move files from subdirectories to queue root (but skip images/ folder)
 for subdir in "$QUEUE_DIR"/*/ ; do
     if [ -d "$subdir" ]; then
-        echo "Moving files from subdirectory..."
-        mv "$subdir"/* "$QUEUE_DIR/" 2>/dev/null || true
-        rmdir "$subdir" 2>/dev/null || true
+        dirname=$(basename "$subdir")
+        if [ "$dirname" != "images" ]; then
+            echo "Moving files from subdirectory: $dirname"
+            mv "$subdir"/* "$QUEUE_DIR/" 2>/dev/null || true
+            rmdir "$subdir" 2>/dev/null || true
+        fi
     fi
 done
 
