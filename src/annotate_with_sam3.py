@@ -39,7 +39,7 @@ class SAM3SharkAnnotator:
         
         # Build SAM 3 model
         sam3_model = build_sam3_image_model(checkpoint_path=checkpoint_path)
-        self.processor = Sam3Processor(sam3_model)
+        self.processor = Sam3Processor(sam3_model, confidence_threshold=0.3)
         
         print(f"✓ SAM 3 loaded on {self.device}")
     
@@ -103,19 +103,20 @@ class SAM3SharkAnnotator:
                 self.processor.reset_all_prompts(inference_state)
                 
                 # Add bounding box prompt
+                # SAM 3 API: add_geometric_prompt() internally calls _forward_grounding()
+                # which populates state["masks"], state["boxes"], state["scores"]
                 inference_state = self.processor.add_geometric_prompt(
                     state=inference_state,
                     box=norm_box,
                     label=True  # Positive prompt
                 )
                 
-                # Get prediction
-                results = self.processor.predict(inference_state)
-                
-                # Extract mask from results
-                if results and 'masks' in results and len(results['masks']) > 0:
+                # Extract masks from inference_state
+                # SAM 3 does NOT have a .predict() method
+                # Results are stored directly in the state after add_geometric_prompt()
+                if 'masks' in inference_state and len(inference_state['masks']) > 0:
                     # Get the first (best) mask
-                    mask = results['masks'][0].cpu().numpy()
+                    mask = inference_state['masks'][0].cpu().numpy()
                     
                     # Convert to binary mask
                     if mask.ndim == 3:
@@ -238,7 +239,9 @@ def process_queue_folder(
             annotations_by_image[img_id] = []
         annotations_by_image[img_id].append(ann)
     
-    print(f"Found {len(image_map)} images with {len(coco_data['annotations'])} annotations")
+    print(f"Found {len(image_map)} total images")
+    print(f"Found {len(annotations_by_image)} images WITH annotations")
+    print(f"Found {len(coco_data['annotations'])} total bounding boxes")
     
     # Initialize SAM 3
     annotator = SAM3SharkAnnotator(checkpoint_path)
@@ -246,6 +249,7 @@ def process_queue_folder(
     # Process each image
     processed_count = 0
     skipped_count = 0
+    annotated_count = 0
     
     for img_id, img_info in tqdm(image_map.items(), desc="Processing images"):
         filename = img_info['file_name']
@@ -256,13 +260,15 @@ def process_queue_folder(
             skipped_count += 1
             continue
         
+        # Copy image
+        shutil.copy(img_path, output_images / filename)
+        
         # Get bounding boxes for this image
         if img_id not in annotations_by_image:
-            # No annotations for this image, copy as-is
-            shutil.copy(img_path, output_images / filename)
-            # Create empty label file
+            # No annotations for this image - create empty label file
             label_path = output_labels / f"{img_path.stem}.txt"
             label_path.touch()
+            processed_count += 1
             continue
         
         bboxes = [ann['bbox'] for ann in annotations_by_image[img_id]]
@@ -270,9 +276,6 @@ def process_queue_folder(
         # Run SAM 3 on this image
         try:
             masks = annotator.process_image_with_boxes(img_path, bboxes)
-            
-            # Copy image
-            shutil.copy(img_path, output_images / filename)
             
             # Export masks to YOLO segmentation format
             img = Image.open(img_path)
@@ -289,6 +292,7 @@ def process_queue_folder(
                         f.write(f"0 {yolo_seg}\n")
             
             processed_count += 1
+            annotated_count += 1
             
         except Exception as e:
             print(f"❌ Error processing {filename}: {e}")
@@ -308,7 +312,9 @@ names: ['shark']
     print(f"\n{'='*70}")
     print(f"✅ PROCESSING COMPLETE")
     print(f"{'='*70}")
-    print(f"Processed: {processed_count} images")
+    print(f"Total images: {len(image_map)}")
+    print(f"Images WITH annotations: {annotated_count}")
+    print(f"Images WITHOUT annotations (empty labels): {processed_count - annotated_count}")
     print(f"Skipped: {skipped_count} images")
     print(f"Output directory: {output_path}")
     print(f"Format: YOLO segmentation")
