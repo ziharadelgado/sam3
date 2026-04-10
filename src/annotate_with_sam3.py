@@ -110,20 +110,21 @@ class SAM3SharkAnnotator:
         return masks
     
     def mask_to_polygon(self, mask):
-        """Convert binary mask to polygon coordinates for YOLO format."""
-        contours, _ = cv2.findContours(
-            mask.astype(np.uint8),
-            cv2.RETR_EXTERNAL,
-            cv2.CHAIN_APPROX_SIMPLE
-        )
-        
-        if not contours:
-            return None
-        
-        # Get largest contour
-        largest = max(contours, key=cv2.contourArea)
-        
-       return largest.flatten().tolist()
+    """Convert binary mask to polygon coordinates for YOLO format."""
+    contours, _ = cv2.findContours(
+        mask.astype(np.uint8),
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE
+    )
+    
+    if not contours:
+        return None
+    
+    # Get largest contour
+    largest = max(contours, key=cv2.contourArea)
+    
+    # Use full contour without simplification
+    return largest.flatten().tolist()
     
     def mask_to_yolo_segmentation(self, mask, img_width, img_height):
         """
