@@ -42,7 +42,7 @@ echo ""
 echo "Step 1: Downloading queue from Google Drive..."
 mkdir -p "$QUEUE_DIR"
 
-timeout 300s rclone copy "$GDRIVE_QUEUE" "$QUEUE_DIR" -v --transfers 8
+timeout 1200s rclone copy "$GDRIVE_QUEUE" "$QUEUE_DIR" -v --transfers 8
 
 if [ $? -ne 0 ]; then
     echo "❌ ERROR: Failed to download queue from Google Drive"
