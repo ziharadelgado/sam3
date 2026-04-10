@@ -123,11 +123,7 @@ class SAM3SharkAnnotator:
         # Get largest contour
         largest = max(contours, key=cv2.contourArea)
         
-        # Approximate polygon
-        epsilon = 0.002 * cv2.arcLength(largest, True)
-        approx = cv2.approxPolyDP(largest, epsilon, True)
-        
-        return approx.flatten().tolist()
+       return largest.flatten().tolist()
     
     def mask_to_yolo_segmentation(self, mask, img_width, img_height):
         """
