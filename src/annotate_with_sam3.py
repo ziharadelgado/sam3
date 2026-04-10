@@ -1,3 +1,10 @@
+#!/usr/bin/env python3
+"""
+SAM 3 Shark Annotation Pipeline
+Reads bounding boxes from COCO JSON, converts to segmentation masks using SAM 3
+Based on official SAM 3 examples and Kamron's SAM 2 pipeline
+"""
+
 import os
 import json
 import argparse
@@ -35,6 +42,31 @@ class SAM3SharkAnnotator:
         self.processor = Sam3Processor(sam3_model)
         
         print(f"✓ SAM 3 loaded on {self.device}")
+    
+    def clean_mask(self, mask):
+        """
+        Remove small disconnected regions from mask.
+        Keeps only the largest connected component (shark body).
+        Removes bite marks and other small artifacts.
+        
+        Based on Kamron's clean_mask function from SAM 2 pipeline.
+        """
+        mask_uint8 = (mask * 255).astype(np.uint8)
+        
+        # Find all connected components
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
+            mask_uint8, 
+            connectivity=8
+        )
+        
+        # Keep only the largest component (excluding background label 0)
+        if num_labels > 1:
+            largest_label = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
+            cleaned = (labels == largest_label).astype(np.uint8)
+        else:
+            cleaned = mask_uint8
+        
+        return cleaned.astype(bool)
     
     def process_image_with_boxes(self, image_path, bboxes):
         """
@@ -89,15 +121,18 @@ class SAM3SharkAnnotator:
                     if mask.ndim == 3:
                         mask = mask[0]  # Take first channel if needed
                     
+                    # CRITICAL: Clean mask to remove bite marks and noise
                     binary_mask = (mask > 0).astype(np.uint8)
-                    masks.append(binary_mask)
+                    cleaned_mask = self.clean_mask(binary_mask)
+                    
+                    masks.append(cleaned_mask)
                 else:
                     # Fallback: create mask from bbox
                     print(f"  ⚠️  SAM 3 returned no mask for bbox, using bbox as fallback")
                     fallback_mask = np.zeros((height, width), dtype=np.uint8)
                     x, y, w, h = [int(v) for v in bbox]
                     fallback_mask[y:y+h, x:x+w] = 1
-                    masks.append(fallback_mask)
+                    masks.append(fallback_mask.astype(bool))
                     
             except Exception as e:
                 print(f"  ❌ Error processing bbox {bbox}: {e}")
@@ -105,29 +140,34 @@ class SAM3SharkAnnotator:
                 fallback_mask = np.zeros((height, width), dtype=np.uint8)
                 x, y, w, h = [int(v) for v in bbox]
                 fallback_mask[y:y+h, x:x+w] = 1
-                masks.append(fallback_mask)
+                masks.append(fallback_mask.astype(bool))
         
         return masks
     
-   def mask_to_polygon(self, mask):
-    """Convert binary mask to polygon coordinates for YOLO format."""
-    contours, _ = cv2.findContours(
-        mask.astype(np.uint8),
-        cv2.RETR_EXTERNAL,
-        cv2.CHAIN_APPROX_NONE  # ← CAMBIAR ESTO (era CHAIN_APPROX_SIMPLE)
-    )
-    
-    if not contours:
-        return None
-    
-    # Get largest contour
-    largest = max(contours, key=cv2.contourArea)
-    
-    # Use contour directly with light smoothing
-    epsilon = 0.001 * cv2.arcLength(largest, True)  # Reducir de 0.002 a 0.001
-    approx = cv2.approxPolyDP(largest, epsilon, True)
-    
-    return approx.flatten().tolist()
+    def mask_to_polygon(self, mask):
+        """
+        Convert binary mask to polygon coordinates for YOLO format.
+        
+        Uses CHAIN_APPROX_NONE to preserve all contour points,
+        then applies light smoothing. Based on Kamron's approach.
+        """
+        contours, _ = cv2.findContours(
+            mask.astype(np.uint8),
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_NONE  # Keep all points for detailed contour
+        )
+        
+        if not contours:
+            return None
+        
+        # Get largest contour
+        largest = max(contours, key=cv2.contourArea)
+        
+        # Apply light smoothing (reduced from 0.002 to 0.001)
+        epsilon = 0.001 * cv2.arcLength(largest, True)
+        approx = cv2.approxPolyDP(largest, epsilon, True)
+        
+        return approx.flatten().tolist()
     
     def mask_to_yolo_segmentation(self, mask, img_width, img_height):
         """
