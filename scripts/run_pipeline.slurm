@@ -103,8 +103,7 @@ cd /home/zihara_delgado_uri_edu/sam3-pipeline
 python3 -u src/annotate_with_sam3.py \
     --queue-dir "$QUEUE_DIR" \
     --output-dir "$OUTPUT_DIR" \
-    --checkpoint "$CHECKPOINT" \
-    --text-prompt "shark"
+    --checkpoint "$CHECKPOINT"
 
 if [ $? -ne 0 ]; then
     echo "❌ ERROR: SAM 3 processing failed"
