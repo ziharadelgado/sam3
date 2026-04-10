@@ -114,7 +114,7 @@ fi
 echo ""
 echo "Step 3: Uploading results to Google Drive..."
 
-timeout 600s rclone copy "$OUTPUT_DIR" "$GDRIVE_OUTPUT" -v --transfers 8
+timeout 1800s rclone copy "$OUTPUT_DIR" "$GDRIVE_OUTPUT" -v --transfers 8
 
 if [ $? -ne 0 ]; then
     echo "⚠️  WARNING: Upload to Google Drive failed or timed out"
