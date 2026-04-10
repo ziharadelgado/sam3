@@ -109,22 +109,25 @@ class SAM3SharkAnnotator:
         
         return masks
     
-    def mask_to_polygon(self, mask):
-        """Convert binary mask to polygon coordinates for YOLO format."""
-        contours, _ = cv2.findContours(
-            mask.astype(np.uint8),
-            cv2.RETR_EXTERNAL,
-            cv2.CHAIN_APPROX_SIMPLE
-        )
-        
-        if not contours:
-            return None
-        
-        # Get largest contour
-        largest = max(contours, key=cv2.contourArea)
-        
-        # Use full contour without simplification
-        return largest.flatten().tolist()
+   def mask_to_polygon(self, mask):
+    """Convert binary mask to polygon coordinates for YOLO format."""
+    contours, _ = cv2.findContours(
+        mask.astype(np.uint8),
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_NONE  # ← CAMBIAR ESTO (era CHAIN_APPROX_SIMPLE)
+    )
+    
+    if not contours:
+        return None
+    
+    # Get largest contour
+    largest = max(contours, key=cv2.contourArea)
+    
+    # Use contour directly with light smoothing
+    epsilon = 0.001 * cv2.arcLength(largest, True)  # Reducir de 0.002 a 0.001
+    approx = cv2.approxPolyDP(largest, epsilon, True)
+    
+    return approx.flatten().tolist()
     
     def mask_to_yolo_segmentation(self, mask, img_width, img_height):
         """
