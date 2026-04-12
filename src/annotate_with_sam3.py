@@ -2,7 +2,7 @@
 """
 SAM 3 Shark Annotation Pipeline
 Reads bounding boxes from COCO JSON, converts to segmentation masks using SAM 3
-Based on official SAM 3 examples and Kamron's SAM 2 pipeline
+
 """
 
 import os
@@ -242,20 +242,16 @@ def process_queue_folder(
     print(f"Found {len(image_map)} total images")
     print(f"Found {len(annotations_by_image)} images WITH annotations")
     print(f"Found {len(coco_data['annotations'])} total bounding boxes")
-    print(f"⚡ Processing ONLY images with annotations (skipping {len(image_map) - len(annotations_by_image)} empty images)")
     
     # Initialize SAM 3
     annotator = SAM3SharkAnnotator(checkpoint_path)
     
-    # Process each image - ONLY IMAGES WITH ANNOTATIONS
+    # Process ALL images (with and without annotations)
     processed_count = 0
     skipped_count = 0
+    annotated_count = 0
     
     for img_id, img_info in tqdm(image_map.items(), desc="Processing images"):
-        # SKIP images without annotations
-        if img_id not in annotations_by_image:
-            continue
-        
         filename = img_info['file_name']
         img_path = images_dir / filename
         
@@ -264,10 +260,17 @@ def process_queue_folder(
             skipped_count += 1
             continue
         
-        # Copy image
+        # Copy image (ALWAYS - all frames)
         shutil.copy(img_path, output_images / filename)
         
-        # Get bounding boxes
+        # Get bounding boxes for this image
+        if img_id not in annotations_by_image:
+            # No annotations for this image - create empty label file
+            label_path = output_labels / f"{img_path.stem}.txt"
+            label_path.touch()
+            processed_count += 1
+            continue
+        
         bboxes = [ann['bbox'] for ann in annotations_by_image[img_id]]
         
         # Run SAM 3 on this image
@@ -289,6 +292,7 @@ def process_queue_folder(
                         f.write(f"0 {yolo_seg}\n")
             
             processed_count += 1
+            annotated_count += 1
             
         except Exception as e:
             print(f"❌ Error processing {filename}: {e}")
@@ -308,7 +312,9 @@ names: ['shark']
     print(f"\n{'='*70}")
     print(f"✅ PROCESSING COMPLETE")
     print(f"{'='*70}")
-    print(f"Processed: {processed_count} images (only those with annotations)")
+    print(f"Total images: {len(image_map)}")
+    print(f"Images WITH annotations: {annotated_count}")
+    print(f"Images WITHOUT annotations (empty labels): {processed_count - annotated_count}")
     print(f"Skipped: {skipped_count} images")
     print(f"Output directory: {output_path}")
     print(f"Format: YOLO segmentation")
