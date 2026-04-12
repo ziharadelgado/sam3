@@ -15,6 +15,7 @@ import numpy as np
 import torch
 import cv2
 from tqdm import tqdm
+import gc
 
 # SAM 3 imports (based on official example)
 from sam3 import build_sam3_image_model
@@ -72,6 +73,9 @@ class SAM3SharkAnnotator:
         """
         Process single image with bounding boxes using SAM 3.
         
+        CRITICAL: This method MUST be called independently for each image.
+        It creates a fresh inference_state to prevent cross-contamination.
+        
         Args:
             image_path: Path to image
             bboxes: List of COCO format bboxes [x, y, w, h]
@@ -79,11 +83,19 @@ class SAM3SharkAnnotator:
         Returns:
             List of segmentation masks (one per bbox)
         """
-        # Load image ONCE for all bboxes in this image
+        # CRITICAL: Clear GPU cache to prevent memory contamination between frames
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
+        # Force garbage collection
+        gc.collect()
+        
+        # Load image
         image = Image.open(image_path).convert('RGB')
         width, height = image.size
         
-        # Create FRESH inference_state for THIS IMAGE
+        # Create COMPLETELY FRESH inference_state for THIS IMAGE ONLY
+        # This prevents any contamination from previous images
         inference_state = self.processor.set_image(image)
         
         masks = []
@@ -91,8 +103,8 @@ class SAM3SharkAnnotator:
         # Process each bbox with the SAME image state
         for idx, bbox in enumerate(bboxes):
             try:
-                # CRITICAL: Reset prompts before each bbox (except first)
-                # This clears the geometric_prompt buffer but keeps the image backbone
+                # CRITICAL: Reset ALL prompts before each bbox (except first)
+                # This clears geometric_prompt buffer but keeps image backbone
                 if idx > 0:
                     self.processor.reset_all_prompts(inference_state)
                 
@@ -143,6 +155,14 @@ class SAM3SharkAnnotator:
                         masks.append(fallback_mask.astype(bool))
                         continue
                     
+                    if coverage < 0.001:
+                        print(f"  ⚠️ WARNING: Mask covers <0.1% of image - using bbox fallback!")
+                        fallback_mask = np.zeros((height, width), dtype=np.uint8)
+                        x, y, w, h = [int(v) for v in bbox]
+                        fallback_mask[y:y+h, x:x+w] = 1
+                        masks.append(fallback_mask.astype(bool))
+                        continue
+                    
                     # CRITICAL: Clean mask to remove bite marks and noise
                     cleaned_mask = self.clean_mask(binary_mask)
                     masks.append(cleaned_mask)
@@ -165,6 +185,14 @@ class SAM3SharkAnnotator:
                 x, y, w, h = [int(v) for v in bbox]
                 fallback_mask[y:y+h, x:x+w] = 1
                 masks.append(fallback_mask.astype(bool))
+        
+        # CRITICAL: Clear GPU memory after processing this image
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
+        # Force delete inference_state to free memory
+        del inference_state
+        gc.collect()
         
         return masks
     
@@ -266,7 +294,7 @@ def process_queue_folder(
     print(f"Found {len(annotations_by_image)} images WITH annotations")
     print(f"Found {len(coco_data['annotations'])} total bounding boxes")
     
-    # Initialize SAM 3
+    # Initialize SAM 3 ONCE for all images
     annotator = SAM3SharkAnnotator(checkpoint_path)
     
     # Process ALL images (with and without annotations)
@@ -301,7 +329,9 @@ def process_queue_folder(
         print(f"Bboxes: {len(bboxes)}")
         print(f"{'='*60}")
         
-        # Run SAM 3 on this image
+        # CRITICAL: Process each image INDEPENDENTLY
+        # The process_image_with_boxes method creates a fresh inference_state
+        # and clears GPU cache to prevent cross-contamination between frames
         try:
             masks = annotator.process_image_with_boxes(img_path, bboxes)
             
