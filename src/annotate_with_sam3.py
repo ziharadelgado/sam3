@@ -79,18 +79,22 @@ class SAM3SharkAnnotator:
         Returns:
             List of segmentation masks (one per bbox)
         """
+        # Load image ONCE for all bboxes in this image
+        image = Image.open(image_path).convert('RGB')
+        width, height = image.size
+        
+        # Create FRESH inference_state for THIS IMAGE
+        inference_state = self.processor.set_image(image)
+        
         masks = []
         
-        # Process EACH bbox independently with fresh state
-        for bbox in bboxes:
+        # Process each bbox with the SAME image state
+        for idx, bbox in enumerate(bboxes):
             try:
-                # Load image FRESH for each bbox to avoid state contamination
-                image = Image.open(image_path).convert('RGB')
-                width, height = image.size
-                
-                # CREATE NEW inference_state for EACH bbox
-                # This prevents cross-contamination between bboxes
-                inference_state = self.processor.set_image(image)
+                # CRITICAL: Reset prompts before each bbox (except first)
+                # This clears the geometric_prompt buffer but keeps the image backbone
+                if idx > 0:
+                    self.processor.reset_all_prompts(inference_state)
                 
                 # Convert COCO bbox [x,y,w,h] to tensor
                 box_xywh = torch.tensor([bbox], dtype=torch.float32)
@@ -102,8 +106,8 @@ class SAM3SharkAnnotator:
                 norm_box = normalize_bbox(box_cxcywh, width, height).flatten().tolist()
                 
                 # DEBUG: Print bbox info
-                print(f"  Processing bbox: {bbox}")
-                print(f"  Normalized box: {norm_box}")
+                print(f"  Bbox {idx+1}/{len(bboxes)}: {bbox}")
+                print(f"  Normalized: {norm_box}")
                 
                 # Add bounding box prompt
                 # SAM 3 API: add_geometric_prompt() internally calls _forward_grounding()
@@ -131,8 +135,7 @@ class SAM3SharkAnnotator:
                     print(f"  Mask coverage: {coverage:.2%} of image")
                     
                     if coverage > 0.8:
-                        print(f"  ⚠️ WARNING: Mask covers >80% of image - likely WRONG!")
-                        print(f"  Using bbox fallback instead")
+                        print(f"  ⚠️ WARNING: Mask covers >80% of image - using bbox fallback!")
                         # Use bbox as fallback for obviously wrong masks
                         fallback_mask = np.zeros((height, width), dtype=np.uint8)
                         x, y, w, h = [int(v) for v in bbox]
@@ -147,7 +150,7 @@ class SAM3SharkAnnotator:
                     
                 else:
                     # Fallback: create mask from bbox
-                    print(f"  ⚠️  SAM 3 returned no mask, using bbox as fallback")
+                    print(f"  ⚠️ SAM 3 returned no mask - using bbox as fallback")
                     fallback_mask = np.zeros((height, width), dtype=np.uint8)
                     x, y, w, h = [int(v) for v in bbox]
                     fallback_mask[y:y+h, x:x+w] = 1
@@ -155,9 +158,9 @@ class SAM3SharkAnnotator:
                     
             except Exception as e:
                 print(f"  ❌ Error processing bbox {bbox}: {e}")
+                import traceback
+                traceback.print_exc()
                 # Fallback mask from bbox
-                image = Image.open(image_path).convert('RGB')
-                width, height = image.size
                 fallback_mask = np.zeros((height, width), dtype=np.uint8)
                 x, y, w, h = [int(v) for v in bbox]
                 fallback_mask[y:y+h, x:x+w] = 1
