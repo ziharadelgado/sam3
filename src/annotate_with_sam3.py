@@ -2,7 +2,7 @@
 """
 SAM 3 Shark Annotation Pipeline
 Reads bounding boxes from COCO JSON, converts to segmentation masks using SAM 3
-
+Based on official SAM 3 examples and Kamron's SAM 2 pipeline
 """
 
 import os
@@ -79,17 +79,19 @@ class SAM3SharkAnnotator:
         Returns:
             List of segmentation masks (one per bbox)
         """
-        # Load image
-        image = Image.open(image_path).convert('RGB')
-        width, height = image.size
-        
-        # Set image in processor
-        inference_state = self.processor.set_image(image)
-        
         masks = []
         
+        # Process EACH bbox independently with fresh state
         for bbox in bboxes:
             try:
+                # Load image FRESH for each bbox to avoid state contamination
+                image = Image.open(image_path).convert('RGB')
+                width, height = image.size
+                
+                # CREATE NEW inference_state for EACH bbox
+                # This prevents cross-contamination between bboxes
+                inference_state = self.processor.set_image(image)
+                
                 # Convert COCO bbox [x,y,w,h] to tensor
                 box_xywh = torch.tensor([bbox], dtype=torch.float32)
                 
@@ -99,8 +101,9 @@ class SAM3SharkAnnotator:
                 # Normalize bbox to [0,1]
                 norm_box = normalize_bbox(box_cxcywh, width, height).flatten().tolist()
                 
-                # Reset prompts for new prediction
-                self.processor.reset_all_prompts(inference_state)
+                # DEBUG: Print bbox info
+                print(f"  Processing bbox: {bbox}")
+                print(f"  Normalized box: {norm_box}")
                 
                 # Add bounding box prompt
                 # SAM 3 API: add_geometric_prompt() internally calls _forward_grounding()
@@ -122,14 +125,29 @@ class SAM3SharkAnnotator:
                     if mask.ndim == 3:
                         mask = mask[0]  # Take first channel if needed
                     
-                    # CRITICAL: Clean mask to remove bite marks and noise
+                    # Check mask coverage BEFORE cleaning
                     binary_mask = (mask > 0).astype(np.uint8)
-                    cleaned_mask = self.clean_mask(binary_mask)
+                    coverage = binary_mask.sum() / (width * height)
+                    print(f"  Mask coverage: {coverage:.2%} of image")
                     
+                    if coverage > 0.8:
+                        print(f"  ⚠️ WARNING: Mask covers >80% of image - likely WRONG!")
+                        print(f"  Using bbox fallback instead")
+                        # Use bbox as fallback for obviously wrong masks
+                        fallback_mask = np.zeros((height, width), dtype=np.uint8)
+                        x, y, w, h = [int(v) for v in bbox]
+                        fallback_mask[y:y+h, x:x+w] = 1
+                        masks.append(fallback_mask.astype(bool))
+                        continue
+                    
+                    # CRITICAL: Clean mask to remove bite marks and noise
+                    cleaned_mask = self.clean_mask(binary_mask)
                     masks.append(cleaned_mask)
+                    print(f"  ✓ Mask generated successfully")
+                    
                 else:
                     # Fallback: create mask from bbox
-                    print(f"  ⚠️  SAM 3 returned no mask for bbox, using bbox as fallback")
+                    print(f"  ⚠️  SAM 3 returned no mask, using bbox as fallback")
                     fallback_mask = np.zeros((height, width), dtype=np.uint8)
                     x, y, w, h = [int(v) for v in bbox]
                     fallback_mask[y:y+h, x:x+w] = 1
@@ -138,6 +156,8 @@ class SAM3SharkAnnotator:
             except Exception as e:
                 print(f"  ❌ Error processing bbox {bbox}: {e}")
                 # Fallback mask from bbox
+                image = Image.open(image_path).convert('RGB')
+                width, height = image.size
                 fallback_mask = np.zeros((height, width), dtype=np.uint8)
                 x, y, w, h = [int(v) for v in bbox]
                 fallback_mask[y:y+h, x:x+w] = 1
@@ -273,6 +293,11 @@ def process_queue_folder(
         
         bboxes = [ann['bbox'] for ann in annotations_by_image[img_id]]
         
+        print(f"\n{'='*60}")
+        print(f"Processing: {filename}")
+        print(f"Bboxes: {len(bboxes)}")
+        print(f"{'='*60}")
+        
         # Run SAM 3 on this image
         try:
             masks = annotator.process_image_with_boxes(img_path, bboxes)
@@ -296,6 +321,8 @@ def process_queue_folder(
             
         except Exception as e:
             print(f"❌ Error processing {filename}: {e}")
+            import traceback
+            traceback.print_exc()
             skipped_count += 1
     
     # Create data.yaml for YOLO
