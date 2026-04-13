@@ -4,10 +4,14 @@ SAM 3 Shark Annotation Pipeline
 Reads bounding boxes from COCO JSON, converts to segmentation masks using SAM 3
 Based on official SAM 3 examples and Kamron's SAM 2 pipeline
 
-KEY FEATURE: Inverted mask detection and correction
-SAM 3 sometimes marks the BACKGROUND (water) instead of the FOREGROUND (shark).
-We detect this by checking if the mask heavily overlaps the crop borders (which are almost always water).
-If >50% of border pixels are marked, we invert the mask.
+KEY FEATURES:
+1. Inverted mask detection and correction
+   - SAM 3 sometimes marks BACKGROUND (water) instead of FOREGROUND (shark)
+   - Detects this by checking if mask overlaps crop borders (which are always water)
+   
+2. Bbox border exclusion
+   - Ensures segmentation NEVER includes pixels where bbox border would be drawn
+   - Prevents overlap with yellow bbox line in Roboflow
 """
 
 import os
@@ -127,6 +131,56 @@ class SAM3SharkAnnotator:
         
         return mask
     
+    def exclude_bbox_border_pixels(self, mask, crop_width, crop_height, border_thickness=2):
+        """
+        Exclude pixels at the crop edges where the bbox border would be.
+        
+        Since we crop with 10px padding, the original bbox border is approximately
+        at the edge of the crop. We exclude these edge pixels to ensure the 
+        segmentation never overlaps with where the bbox line would be drawn.
+        
+        The bbox SURROUNDS the shark but NEVER touches it, so pixels at the
+        crop border are ALWAYS water/background, never shark.
+        
+        Visual explanation:
+        ╔═══════════════════╗  ← These 2-3 pixels = FORBIDDEN (bbox line zone)
+        ║░░░░░░░░░░░░░░░░░░░║  
+        ║░┌───────────────┐░║  ← Original bbox (where yellow line would be)
+        ║░│   🦈 shark    │░║  ← Only INSIDE can have segmentation
+        ║░└───────────────┘░║
+        ║░░░░░░░░░░░░░░░░░░░║
+        ╚═══════════════════╝  ← FORBIDDEN
+        
+        Args:
+            mask: Binary mask (bool or uint8)
+            crop_width: Width of cropped image
+            crop_height: Height of cropped image  
+            border_thickness: Pixels to exclude from each edge (2-3 recommended)
+        
+        Returns:
+            Mask with border zone excluded (bool)
+        """
+        if mask.dtype != bool:
+            mask = mask.astype(bool)
+        
+        # Create mask for "forbidden zone" (where bbox border would be drawn)
+        forbidden_zone = np.zeros((crop_height, crop_width), dtype=bool)
+        
+        # Mark the outer edges as forbidden
+        forbidden_zone[:border_thickness, :] = True              # Top
+        forbidden_zone[-border_thickness:, :] = True             # Bottom
+        forbidden_zone[:, :border_thickness] = True              # Left
+        forbidden_zone[:, -border_thickness:] = True             # Right
+        
+        # Remove forbidden pixels from segmentation
+        mask_cleaned = mask & (~forbidden_zone)
+        
+        excluded = (mask & forbidden_zone).sum()
+        if excluded > 0:
+            print(f"  🚫 Removed {excluded} pixels from bbox border zone")
+        
+        return mask_cleaned
+    
     def process_image_with_boxes(self, image_path, bboxes):
         """
         Process single image with bounding boxes using SAM 3.
@@ -134,8 +188,9 @@ class SAM3SharkAnnotator:
         Uses CROPPING strategy: crops image to bbox before SAM 3,
         ensuring SAM 3 can ONLY segment within the bbox region.
         
-        Includes inverted mask detection: checks if SAM 3 marked
-        background (water) instead of foreground (shark) and corrects it.
+        Includes two critical fixes:
+        1. Inverted mask detection (water vs shark confusion)
+        2. Bbox border exclusion (prevents overlap with bbox line)
         
         Args:
             image_path: Path to image
@@ -222,13 +277,23 @@ class SAM3SharkAnnotator:
                         del inference_state
                         continue
                     
-                    # CRITICAL: Check if mask is INVERTED
+                    # CRITICAL FIX 1: Check if mask is INVERTED
                     # (SAM 3 marking water instead of shark)
                     crop_binary_mask_bool = crop_binary_mask.astype(bool)
                     crop_binary_mask_bool = self.fix_inverted_mask(
                         crop_binary_mask_bool, 
                         cropped_image
                     )
+                    
+                    # CRITICAL FIX 2: Exclude pixels where bbox border would be drawn
+                    # (prevents segmentation from overlapping with yellow bbox line)
+                    crop_binary_mask_bool = self.exclude_bbox_border_pixels(
+                        crop_binary_mask_bool,
+                        crop_width,
+                        crop_height,
+                        border_thickness=2  # 2-3px is safe
+                    )
+                    
                     crop_binary_mask = crop_binary_mask_bool.astype(np.uint8)
                     
                     # Clean the cropped mask (remove small disconnected regions)
@@ -405,7 +470,7 @@ def process_queue_folder(
             # Create new annotator instance
             annotator = SAM3SharkAnnotator(checkpoint_path)
             
-            # Process this image with CROPPING + INVERSION detection
+            # Process this image with CROPPING + INVERSION detection + BORDER exclusion
             masks = annotator.process_image_with_boxes(img_path, bboxes)
             
             # CRITICAL: Delete annotator immediately after use
