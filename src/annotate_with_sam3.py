@@ -2,7 +2,12 @@
 """
 SAM 3 Shark Annotation Pipeline
 Reads bounding boxes from COCO JSON, converts to segmentation masks using SAM 3
+Based on official SAM 3 examples and Kamron's SAM 2 pipeline
 
+KEY FEATURE: Inverted mask detection and correction
+SAM 3 sometimes marks the BACKGROUND (water) instead of the FOREGROUND (shark).
+We detect this by checking if the mask heavily overlaps the crop borders (which are almost always water).
+If >50% of border pixels are marked, we invert the mask.
 """
 
 import os
@@ -69,12 +74,68 @@ class SAM3SharkAnnotator:
         
         return cleaned.astype(bool)
     
+    def fix_inverted_mask(self, mask, cropped_image):
+        """
+        Detect and fix inverted masks (when SAM 3 marks background instead of shark).
+        
+        Strategy: Sample border pixels (which are almost always water/background).
+        If mask heavily overlaps borders, it's inverted.
+        
+        This is a common issue with SAM models on low-contrast subjects:
+        - Bioluminescent sharks have low contrast with dark water
+        - SAM 3 sometimes thinks the shark is "background" and water is "foreground"
+        - We detect this by checking border coverage
+        
+        Args:
+            mask: Binary mask (bool or uint8)
+            cropped_image: PIL Image (cropped bbox region)
+        
+        Returns:
+            Corrected mask (bool)
+        """
+        crop_height, crop_width = mask.shape
+        
+        # Create border mask (10px band around edges)
+        # This band is almost always water/background (95%+ of the time)
+        border_mask = np.zeros_like(mask, dtype=bool)
+        border_width = 10
+        
+        # Mark border pixels (top, bottom, left, right)
+        border_mask[:border_width, :] = True  # Top edge
+        border_mask[-border_width:, :] = True  # Bottom edge
+        border_mask[:, :border_width] = True  # Left edge
+        border_mask[:, -border_width:] = True  # Right edge
+        
+        # Convert mask to bool if needed
+        if mask.dtype != bool:
+            mask = mask.astype(bool)
+        
+        # Calculate how much of the border is marked as "shark"
+        border_pixels_marked = (mask & border_mask).sum()
+        total_border_pixels = border_mask.sum()
+        border_coverage = border_pixels_marked / total_border_pixels
+        
+        print(f"  Border analysis: {border_coverage:.1%} of border marked as shark")
+        
+        # If >50% of border is marked as "shark", the mask is INVERTED
+        # (SAM 3 is marking water as shark, and shark as water)
+        if border_coverage > 0.5:
+            print(f"  🔄 INVERTING mask (was marking water, now marks shark)")
+            mask = ~mask  # Bitwise NOT: flip all pixels (0→1, 1→0)
+        else:
+            print(f"  ✓ Mask orientation correct (shark is foreground)")
+        
+        return mask
+    
     def process_image_with_boxes(self, image_path, bboxes):
         """
         Process single image with bounding boxes using SAM 3.
         
         Uses CROPPING strategy: crops image to bbox before SAM 3,
         ensuring SAM 3 can ONLY segment within the bbox region.
+        
+        Includes inverted mask detection: checks if SAM 3 marked
+        background (water) instead of foreground (shark) and corrects it.
         
         Args:
             image_path: Path to image
@@ -103,7 +164,8 @@ class SAM3SharkAnnotator:
                 x, y, w, h = bbox
                 x, y, w, h = int(x), int(y), int(w), int(h)
                 
-                # Add small padding to give SAM 3 context (optional, 10 pixels)
+                # Add small padding to give SAM 3 context (10 pixels)
+                # This helps SAM 3 see the boundary between shark and water
                 padding = 10
                 x_pad = max(0, x - padding)
                 y_pad = max(0, y - padding)
@@ -160,7 +222,16 @@ class SAM3SharkAnnotator:
                         del inference_state
                         continue
                     
-                    # Clean the cropped mask
+                    # CRITICAL: Check if mask is INVERTED
+                    # (SAM 3 marking water instead of shark)
+                    crop_binary_mask_bool = crop_binary_mask.astype(bool)
+                    crop_binary_mask_bool = self.fix_inverted_mask(
+                        crop_binary_mask_bool, 
+                        cropped_image
+                    )
+                    crop_binary_mask = crop_binary_mask_bool.astype(np.uint8)
+                    
+                    # Clean the cropped mask (remove small disconnected regions)
                     cleaned_crop_mask = self.clean_mask(crop_binary_mask)
                     
                     # CRITICAL: Map the cropped mask back to FULL image coordinates
@@ -334,7 +405,7 @@ def process_queue_folder(
             # Create new annotator instance
             annotator = SAM3SharkAnnotator(checkpoint_path)
             
-            # Process this image with CROPPING strategy
+            # Process this image with CROPPING + INVERSION detection
             masks = annotator.process_image_with_boxes(img_path, bboxes)
             
             # CRITICAL: Delete annotator immediately after use
