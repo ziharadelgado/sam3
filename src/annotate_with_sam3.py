@@ -40,7 +40,7 @@ class SAM3SharkAnnotator:
         
         # Build SAM 3 model
         sam3_model = build_sam3_image_model(checkpoint_path=checkpoint_path)
-        self.processor = Sam3Processor(sam3_model, confidence_threshold=0.3)
+        self.processor = Sam3Processor(sam3_model, confidence_threshold=0.1)
         
         print(f"✓ SAM 3 loaded on {self.device}")
     
@@ -73,8 +73,8 @@ class SAM3SharkAnnotator:
         """
         Process single image with bounding boxes using SAM 3.
         
-        CRITICAL: This method MUST be called independently for each image.
-        It creates a fresh inference_state to prevent cross-contamination.
+        CRITICAL: This method MUST be called with a FRESH annotator instance
+        to prevent cross-contamination between frames.
         
         Args:
             image_path: Path to image
@@ -83,7 +83,7 @@ class SAM3SharkAnnotator:
         Returns:
             List of segmentation masks (one per bbox)
         """
-        # CRITICAL: Clear GPU cache to prevent memory contamination between frames
+        # CRITICAL: Clear GPU cache before starting
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         
@@ -95,7 +95,6 @@ class SAM3SharkAnnotator:
         width, height = image.size
         
         # Create COMPLETELY FRESH inference_state for THIS IMAGE ONLY
-        # This prevents any contamination from previous images
         inference_state = self.processor.set_image(image)
         
         masks = []
@@ -104,7 +103,6 @@ class SAM3SharkAnnotator:
         for idx, bbox in enumerate(bboxes):
             try:
                 # CRITICAL: Reset ALL prompts before each bbox (except first)
-                # This clears geometric_prompt buffer but keeps image backbone
                 if idx > 0:
                     self.processor.reset_all_prompts(inference_state)
                 
@@ -122,8 +120,6 @@ class SAM3SharkAnnotator:
                 print(f"  Normalized: {norm_box}")
                 
                 # Add bounding box prompt
-                # SAM 3 API: add_geometric_prompt() internally calls _forward_grounding()
-                # which populates state["masks"], state["boxes"], state["scores"]
                 inference_state = self.processor.add_geometric_prompt(
                     state=inference_state,
                     box=norm_box,
@@ -131,8 +127,6 @@ class SAM3SharkAnnotator:
                 )
                 
                 # Extract masks from inference_state
-                # SAM 3 does NOT have a .predict() method
-                # Results are stored directly in the state after add_geometric_prompt()
                 if 'masks' in inference_state and len(inference_state['masks']) > 0:
                     # Get the first (best) mask
                     mask = inference_state['masks'][0].cpu().numpy()
@@ -148,7 +142,6 @@ class SAM3SharkAnnotator:
                     
                     if coverage > 0.8:
                         print(f"  ⚠️ WARNING: Mask covers >80% of image - using bbox fallback!")
-                        # Use bbox as fallback for obviously wrong masks
                         fallback_mask = np.zeros((height, width), dtype=np.uint8)
                         x, y, w, h = [int(v) for v in bbox]
                         fallback_mask[y:y+h, x:x+w] = 1
@@ -186,12 +179,10 @@ class SAM3SharkAnnotator:
                 fallback_mask[y:y+h, x:x+w] = 1
                 masks.append(fallback_mask.astype(bool))
         
-        # CRITICAL: Clear GPU memory after processing this image
+        # CRITICAL: Clear GPU memory and delete state
+        del inference_state
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        
-        # Force delete inference_state to free memory
-        del inference_state
         gc.collect()
         
         return masks
@@ -294,8 +285,7 @@ def process_queue_folder(
     print(f"Found {len(annotations_by_image)} images WITH annotations")
     print(f"Found {len(coco_data['annotations'])} total bounding boxes")
     
-    # Initialize SAM 3 ONCE for all images
-    annotator = SAM3SharkAnnotator(checkpoint_path)
+    # DO NOT create global annotator - create fresh one for each image
     
     # Process ALL images (with and without annotations)
     processed_count = 0
@@ -329,11 +319,20 @@ def process_queue_folder(
         print(f"Bboxes: {len(bboxes)}")
         print(f"{'='*60}")
         
-        # CRITICAL: Process each image INDEPENDENTLY
-        # The process_image_with_boxes method creates a fresh inference_state
-        # and clears GPU cache to prevent cross-contamination between frames
+        # CRITICAL: Create FRESH annotator for EACH image
+        # This is slow but ensures ZERO cross-contamination between frames
         try:
+            # Create new annotator instance
+            annotator = SAM3SharkAnnotator(checkpoint_path)
+            
+            # Process this image
             masks = annotator.process_image_with_boxes(img_path, bboxes)
+            
+            # CRITICAL: Delete annotator immediately after use
+            del annotator
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
             
             # Export masks to YOLO segmentation format
             img = Image.open(img_path)
@@ -342,9 +341,14 @@ def process_queue_folder(
             label_path = output_labels / f"{img_path.stem}.txt"
             with open(label_path, 'w') as f:
                 for mask in masks:
-                    yolo_seg = annotator.mask_to_yolo_segmentation(
+                    # Use the annotator's mask_to_yolo_segmentation method
+                    # Since we deleted annotator, create a temporary one just for conversion
+                    temp_annotator = SAM3SharkAnnotator(checkpoint_path)
+                    yolo_seg = temp_annotator.mask_to_yolo_segmentation(
                         mask, img_width, img_height
                     )
+                    del temp_annotator
+                    
                     if yolo_seg:
                         # Class 0 for shark
                         f.write(f"0 {yolo_seg}\n")
