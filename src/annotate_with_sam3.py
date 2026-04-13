@@ -2,7 +2,7 @@
 """
 SAM 3 Shark Annotation Pipeline
 Reads bounding boxes from COCO JSON, converts to segmentation masks using SAM 3
-Based on official SAM 3 examples and Kamron's SAM 2 pipeline
+
 """
 
 import os
@@ -73,8 +73,8 @@ class SAM3SharkAnnotator:
         """
         Process single image with bounding boxes using SAM 3.
         
-        CRITICAL: This method MUST be called with a FRESH annotator instance
-        to prevent cross-contamination between frames.
+        Uses CROPPING strategy: crops image to bbox before SAM 3,
+        ensuring SAM 3 can ONLY segment within the bbox region.
         
         Args:
             image_path: Path to image
@@ -90,97 +90,109 @@ class SAM3SharkAnnotator:
         # Force garbage collection
         gc.collect()
         
-        # Load image
-        image = Image.open(image_path).convert('RGB')
-        width, height = image.size
-        
-        # Create COMPLETELY FRESH inference_state for THIS IMAGE ONLY
-        inference_state = self.processor.set_image(image)
+        # Load FULL image once
+        full_image = Image.open(image_path).convert('RGB')
+        full_width, full_height = full_image.size
         
         masks = []
         
-        # Process each bbox with the SAME image state
+        # Process each bbox INDEPENDENTLY with CROPPING
         for idx, bbox in enumerate(bboxes):
             try:
-                # CRITICAL: Reset ALL prompts before each bbox (except first)
-                if idx > 0:
-                    self.processor.reset_all_prompts(inference_state)
+                # Extract bbox coordinates
+                x, y, w, h = bbox
+                x, y, w, h = int(x), int(y), int(w), int(h)
                 
-                # Convert COCO bbox [x,y,w,h] to tensor
-                box_xywh = torch.tensor([bbox], dtype=torch.float32)
+                # Add small padding to give SAM 3 context (optional, 10 pixels)
+                padding = 10
+                x_pad = max(0, x - padding)
+                y_pad = max(0, y - padding)
+                w_pad = min(full_width - x_pad, w + 2*padding)
+                h_pad = min(full_height - y_pad, h + 2*padding)
                 
-                # Convert to CXCYWH format (center_x, center_y, width, height)
-                box_cxcywh = box_xywh_to_cxcywh(box_xywh)
+                print(f"\n  Bbox {idx+1}/{len(bboxes)}")
+                print(f"  Original bbox: [{x}, {y}, {w}, {h}]")
+                print(f"  Padded crop: [{x_pad}, {y_pad}, {w_pad}, {h_pad}]")
                 
-                # Normalize bbox to [0,1]
-                norm_box = normalize_bbox(box_cxcywh, width, height).flatten().tolist()
+                # CROP image to bbox region (with padding)
+                cropped_image = full_image.crop((x_pad, y_pad, x_pad + w_pad, y_pad + h_pad))
+                crop_width, crop_height = cropped_image.size
                 
-                # DEBUG: Print bbox info
-                print(f"  Bbox {idx+1}/{len(bboxes)}: {bbox}")
-                print(f"  Normalized: {norm_box}")
+                print(f"  Cropped image size: {crop_width}x{crop_height}")
                 
-                # Add bounding box prompt
+                # Set the CROPPED image in SAM 3
+                inference_state = self.processor.set_image(cropped_image)
+                
+                # Create bbox that covers the ENTIRE cropped image
+                # (since we already cropped to the bbox, just segment everything)
+                # Format: [center_x, center_y, width, height] normalized [0,1]
+                full_crop_box = [0.5, 0.5, 1.0, 1.0]  # Center of crop, full size
+                
+                print(f"  SAM 3 prompt: segment entire crop [0.5, 0.5, 1.0, 1.0]")
+                
+                # Add prompt to segment the entire cropped region
                 inference_state = self.processor.add_geometric_prompt(
                     state=inference_state,
-                    box=norm_box,
+                    box=full_crop_box,
                     label=True  # Positive prompt
                 )
                 
                 # Extract masks from inference_state
                 if 'masks' in inference_state and len(inference_state['masks']) > 0:
-                    # Get the first (best) mask
-                    mask = inference_state['masks'][0].cpu().numpy()
+                    # Get the first (best) mask from CROPPED image
+                    crop_mask = inference_state['masks'][0].cpu().numpy()
                     
                     # Convert to binary mask
-                    if mask.ndim == 3:
-                        mask = mask[0]  # Take first channel if needed
+                    if crop_mask.ndim == 3:
+                        crop_mask = crop_mask[0]
                     
-                    # Check mask coverage BEFORE cleaning
-                    binary_mask = (mask > 0).astype(np.uint8)
-                    coverage = binary_mask.sum() / (width * height)
-                    print(f"  Mask coverage: {coverage:.2%} of image")
+                    crop_binary_mask = (crop_mask > 0).astype(np.uint8)
                     
-                    if coverage > 0.8:
-                        print(f"  ⚠️ WARNING: Mask covers >80% of image - using bbox fallback!")
-                        fallback_mask = np.zeros((height, width), dtype=np.uint8)
-                        x, y, w, h = [int(v) for v in bbox]
+                    # Check if mask is reasonable
+                    crop_coverage = crop_binary_mask.sum() / (crop_width * crop_height)
+                    print(f"  Crop mask coverage: {crop_coverage:.2%}")
+                    
+                    if crop_coverage < 0.001:
+                        print(f"  ⚠️ WARNING: Mask too small - using bbox fallback!")
+                        fallback_mask = np.zeros((full_height, full_width), dtype=np.uint8)
                         fallback_mask[y:y+h, x:x+w] = 1
                         masks.append(fallback_mask.astype(bool))
+                        del inference_state
                         continue
                     
-                    if coverage < 0.001:
-                        print(f"  ⚠️ WARNING: Mask covers <0.1% of image - using bbox fallback!")
-                        fallback_mask = np.zeros((height, width), dtype=np.uint8)
-                        x, y, w, h = [int(v) for v in bbox]
-                        fallback_mask[y:y+h, x:x+w] = 1
-                        masks.append(fallback_mask.astype(bool))
-                        continue
+                    # Clean the cropped mask
+                    cleaned_crop_mask = self.clean_mask(crop_binary_mask)
                     
-                    # CRITICAL: Clean mask to remove bite marks and noise
-                    cleaned_mask = self.clean_mask(binary_mask)
-                    masks.append(cleaned_mask)
-                    print(f"  ✓ Mask generated successfully")
+                    # CRITICAL: Map the cropped mask back to FULL image coordinates
+                    full_mask = np.zeros((full_height, full_width), dtype=np.uint8)
+                    
+                    # Place the cropped mask in the correct position
+                    full_mask[y_pad:y_pad+crop_height, x_pad:x_pad+crop_width] = cleaned_crop_mask
+                    
+                    masks.append(full_mask.astype(bool))
+                    print(f"  ✓ Mask generated and mapped to full image")
                     
                 else:
                     # Fallback: create mask from bbox
                     print(f"  ⚠️ SAM 3 returned no mask - using bbox as fallback")
-                    fallback_mask = np.zeros((height, width), dtype=np.uint8)
-                    x, y, w, h = [int(v) for v in bbox]
+                    fallback_mask = np.zeros((full_height, full_width), dtype=np.uint8)
                     fallback_mask[y:y+h, x:x+w] = 1
                     masks.append(fallback_mask.astype(bool))
+                
+                # Clean up
+                del inference_state
                     
             except Exception as e:
                 print(f"  ❌ Error processing bbox {bbox}: {e}")
                 import traceback
                 traceback.print_exc()
                 # Fallback mask from bbox
-                fallback_mask = np.zeros((height, width), dtype=np.uint8)
+                fallback_mask = np.zeros((full_height, full_width), dtype=np.uint8)
                 x, y, w, h = [int(v) for v in bbox]
                 fallback_mask[y:y+h, x:x+w] = 1
                 masks.append(fallback_mask.astype(bool))
         
-        # CRITICAL: Clear GPU memory and delete state
-        del inference_state
+        # CRITICAL: Clear GPU memory
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         gc.collect()
@@ -285,8 +297,6 @@ def process_queue_folder(
     print(f"Found {len(annotations_by_image)} images WITH annotations")
     print(f"Found {len(coco_data['annotations'])} total bounding boxes")
     
-    # DO NOT create global annotator - create fresh one for each image
-    
     # Process ALL images (with and without annotations)
     processed_count = 0
     skipped_count = 0
@@ -320,12 +330,11 @@ def process_queue_folder(
         print(f"{'='*60}")
         
         # CRITICAL: Create FRESH annotator for EACH image
-        # This is slow but ensures ZERO cross-contamination between frames
         try:
             # Create new annotator instance
             annotator = SAM3SharkAnnotator(checkpoint_path)
             
-            # Process this image
+            # Process this image with CROPPING strategy
             masks = annotator.process_image_with_boxes(img_path, bboxes)
             
             # CRITICAL: Delete annotator immediately after use
@@ -341,8 +350,7 @@ def process_queue_folder(
             label_path = output_labels / f"{img_path.stem}.txt"
             with open(label_path, 'w') as f:
                 for mask in masks:
-                    # Use the annotator's mask_to_yolo_segmentation method
-                    # Since we deleted annotator, create a temporary one just for conversion
+                    # Use a temporary annotator just for conversion
                     temp_annotator = SAM3SharkAnnotator(checkpoint_path)
                     yolo_seg = temp_annotator.mask_to_yolo_segmentation(
                         mask, img_width, img_height
