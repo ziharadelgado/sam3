@@ -2,7 +2,7 @@
 """
 SAM 3 Shark Annotation Pipeline
 Reads bounding boxes from COCO JSON, converts to segmentation masks using SAM 3
-Based on official SAM 3 examples and Kamron's SAM 2 pipeline
+
 
 KEY FEATURES:
 1. Inverted mask detection and correction
