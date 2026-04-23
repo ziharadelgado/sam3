@@ -2,8 +2,8 @@
 """
 SAM 3 Shark Annotation Pipeline
 Reads bounding boxes from COCO JSON, converts to segmentation masks using SAM 3
-
-
+ 
+ 
 KEY FEATURES:
 1. Inverted mask detection and correction
    - SAM 3 sometimes marks BACKGROUND (water) instead of FOREGROUND (shark)
@@ -12,8 +12,12 @@ KEY FEATURES:
 2. Bbox border exclusion
    - Ensures segmentation NEVER includes pixels where bbox border would be drawn
    - Prevents overlap with yellow bbox line in Roboflow
+ 
+3. Single model load
+   - SAM 3 model is loaded ONCE and reused for all images
+   - Prevents GPU memory leak from repeated model loading
 """
-
+ 
 import os
 import json
 import argparse
@@ -25,14 +29,14 @@ import torch
 import cv2
 from tqdm import tqdm
 import gc
-
+ 
 # SAM 3 imports (based on official example)
 from sam3 import build_sam3_image_model
 from sam3.model.box_ops import box_xywh_to_cxcywh
 from sam3.model.sam3_image_processor import Sam3Processor
 from sam3.visualization_utils import normalize_bbox
-
-
+ 
+ 
 class SAM3SharkAnnotator:
     def __init__(self, checkpoint_path, device='cuda'):
         """Initialize SAM 3 model for shark segmentation."""
@@ -141,15 +145,6 @@ class SAM3SharkAnnotator:
         
         The bbox SURROUNDS the shark but NEVER touches it, so pixels at the
         crop border are ALWAYS water/background, never shark.
-        
-        Visual explanation:
-        ╔═══════════════════╗  ← These 2-3 pixels = FORBIDDEN (bbox line zone)
-        ║░░░░░░░░░░░░░░░░░░░║  
-        ║░┌───────────────┐░║  ← Original bbox (where yellow line would be)
-        ║░│   🦈 shark    │░║  ← Only INSIDE can have segmentation
-        ║░└───────────────┘░║
-        ║░░░░░░░░░░░░░░░░░░░║
-        ╚═══════════════════╝  ← FORBIDDEN
         
         Args:
             mask: Binary mask (bool or uint8)
@@ -315,7 +310,7 @@ class SAM3SharkAnnotator:
                     fallback_mask[y:y+h, x:x+w] = 1
                     masks.append(fallback_mask.astype(bool))
                 
-                # Clean up
+                # Clean up inference state
                 del inference_state
                     
             except Exception as e:
@@ -328,7 +323,7 @@ class SAM3SharkAnnotator:
                 fallback_mask[y:y+h, x:x+w] = 1
                 masks.append(fallback_mask.astype(bool))
         
-        # CRITICAL: Clear GPU memory
+        # CRITICAL: Clear GPU memory after processing all bboxes in this image
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         gc.collect()
@@ -380,8 +375,8 @@ class SAM3SharkAnnotator:
             normalized.extend([x, y])
         
         return ' '.join(map(str, normalized))
-
-
+ 
+ 
 def process_queue_folder(
     queue_dir,
     output_dir,
@@ -433,6 +428,12 @@ def process_queue_folder(
     print(f"Found {len(annotations_by_image)} images WITH annotations")
     print(f"Found {len(coco_data['annotations'])} total bounding boxes")
     
+    # ══════════════════════════════════════════════════════════════
+    # CRITICAL FIX: Load SAM 3 model ONCE, reuse for ALL images
+    # Previously loaded per-image, causing GPU memory leak
+    # ══════════════════════════════════════════════════════════════
+    annotator = SAM3SharkAnnotator(checkpoint_path)
+    
     # Process ALL images (with and without annotations)
     processed_count = 0
     skipped_count = 0
@@ -465,19 +466,9 @@ def process_queue_folder(
         print(f"Bboxes: {len(bboxes)}")
         print(f"{'='*60}")
         
-        # CRITICAL: Create FRESH annotator for EACH image
         try:
-            # Create new annotator instance
-            annotator = SAM3SharkAnnotator(checkpoint_path)
-            
-            # Process this image with CROPPING + INVERSION detection + BORDER exclusion
+            # Process this image with the SHARED annotator
             masks = annotator.process_image_with_boxes(img_path, bboxes)
-            
-            # CRITICAL: Delete annotator immediately after use
-            del annotator
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            gc.collect()
             
             # Export masks to YOLO segmentation format
             img = Image.open(img_path)
@@ -486,12 +477,10 @@ def process_queue_folder(
             label_path = output_labels / f"{img_path.stem}.txt"
             with open(label_path, 'w') as f:
                 for mask in masks:
-                    # Use a temporary annotator just for conversion
-                    temp_annotator = SAM3SharkAnnotator(checkpoint_path)
-                    yolo_seg = temp_annotator.mask_to_yolo_segmentation(
+                    # mask_to_yolo_segmentation is CPU-only, no need for separate annotator
+                    yolo_seg = annotator.mask_to_yolo_segmentation(
                         mask, img_width, img_height
                     )
-                    del temp_annotator
                     
                     if yolo_seg:
                         # Class 0 for shark
@@ -506,13 +495,19 @@ def process_queue_folder(
             traceback.print_exc()
             skipped_count += 1
     
+    # Clean up model
+    del annotator
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    gc.collect()
+    
     # Create data.yaml for YOLO
     data_yaml = output_path / "data.yaml"
     with open(data_yaml, 'w') as f:
         f.write(f"""# SAM 3 Shark Dataset
 train: images/
 val: images/
-
+ 
 nc: 1
 names: ['shark']
 """)
@@ -529,8 +524,8 @@ names: ['shark']
     print(f"{'='*70}\n")
     
     return output_path
-
-
+ 
+ 
 def main():
     parser = argparse.ArgumentParser(
         description="SAM 3 Shark Annotation Pipeline"
@@ -562,7 +557,7 @@ def main():
         output_dir=args.output_dir,
         checkpoint_path=args.checkpoint
     )
-
-
+ 
+ 
 if __name__ == '__main__':
     main()
